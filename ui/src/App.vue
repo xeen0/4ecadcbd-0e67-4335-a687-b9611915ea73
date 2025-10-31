@@ -1,6 +1,6 @@
 <template>
   <div class="min-h-screen bg-gray-50 flex flex-col items-center py-8 px-4">
-    <div class="bg-emerald-50 rounded-xl shadow-lg w-full max-w-6xl p-6">
+    <div class="bg-emerald-50 rounded-xl shadow-lg w-full max-w-7xl p-6">
       <h2 class="text-2xl font-semibold text-emerald-800 mb-1">
         Estimated carbon savings and diesel savings
       </h2>
@@ -98,10 +98,14 @@ const totalFuel = ref(0)
 const rangeCarbon = ref(0)
 const rangeFuel = ref(0)
 const chartData = ref([])
+let chartLabels = []
+let isAdjustingZoom = false
+const MAX_ZOOM_MS = 24 * 60 * 60 * 1000
 
 const ranges = [
   { label: "Last 7 days", days: 7 },
   { label: "Last 30 days", days: 30 },
+  { label: "Last 60 days", days: 60 },
   { label: "Last year", days: 365 },
 ]
 
@@ -155,17 +159,29 @@ function setRange(days) {
 }
 
 function renderChart() {
-  const labels = chartData.value.map(d => dayjs(d.timestamp).format("MMM DD"))
+  if (!chartData.value.length) return
+  chartLabels = chartData.value.map(d => d.timestamp)
   const carbon = chartData.value.map(d => d.carbon)
   const fuel = chartData.value.map(d => d.fuel)
 
   if (!chart) chart = echarts.init(chartRef.value)
+  chart.off("datazoom")
   chart.setOption({
     tooltip: { trigger: "axis" },
     legend: { data: ["Carbon savings", "Diesel savings"] },
-    toolbox: { feature: { dataZoom: {}, restore: {}, saveAsImage: {} } },
-    dataZoom: [{ type: "inside" }, { type: "slider" }],
-    xAxis: [{ type: "category", data: labels }],
+    toolbox: { feature: { restore: {}, saveAsImage: {} } },
+    dataZoom: [
+      { type: "inside", xAxisIndex: 0, zoomOnMouseWheel: true, moveOnMouseWheel: false },
+    ],
+    xAxis: [
+      {
+        type: "category",
+        data: chartLabels,
+        axisLabel: {
+          formatter: value => dayjs(value).format("MMM DD HH:mm"),
+        },
+      },
+    ],
     yAxis: [
       { type: "value", name: "Carbon (kg)" },
       { type: "value", name: "Fuel (L)", position: "right" },
@@ -175,6 +191,7 @@ function renderChart() {
       { name: "Diesel savings", type: "bar", data: fuel, color: "#6366f1", yAxisIndex: 1 },
     ],
   })
+  chart.on("datazoom", handleDataZoom)
 }
 
 function exportPNG() {
@@ -191,4 +208,56 @@ function exportCSV() {
   saveAs(blob, "savings-data.csv")
 }
 
+function handleDataZoom(event) {
+  if (isAdjustingZoom || chartData.value.length < 2) return
+  const payload = event.batch ? event.batch[0] : event
+  const toIndex = value => {
+    if (value == null) return null
+    const idx = chartLabels.indexOf(value)
+    return idx === -1 ? null : idx
+  }
+  const toIndexFromPercent = percent => {
+    if (percent == null) return null
+    const raw = Math.round((percent / 100) * (chartLabels.length - 1))
+    return Math.min(Math.max(raw, 0), chartLabels.length - 1)
+  }
+
+  let startIndex = toIndex(payload.startValue)
+  let endIndex = toIndex(payload.endValue)
+  if (startIndex == null) startIndex = toIndexFromPercent(payload.start)
+  if (endIndex == null) endIndex = toIndexFromPercent(payload.end)
+  if (startIndex == null) startIndex = 0
+  if (endIndex == null) endIndex = chartLabels.length - 1
+
+  let newStart = Math.min(startIndex, endIndex)
+  let newEnd = Math.max(startIndex, endIndex)
+  let startTime = dayjs(chartData.value[newStart].timestamp)
+  let endTime = dayjs(chartData.value[newEnd].timestamp)
+  if (endTime.diff(startTime) >= MAX_ZOOM_MS) return
+
+  const lastIndex = chartData.value.length - 1
+  while (endTime.diff(startTime) < MAX_ZOOM_MS && (newStart > 0 || newEnd < lastIndex)) {
+    if (newEnd < lastIndex) {
+      newEnd += 1
+      endTime = dayjs(chartData.value[newEnd].timestamp)
+      if (endTime.diff(startTime) >= MAX_ZOOM_MS) break
+    }
+    if (newStart > 0) {
+      newStart -= 1
+      startTime = dayjs(chartData.value[newStart].timestamp)
+    } else {
+      break
+    }
+  }
+
+  if (endTime.diff(startTime) < MAX_ZOOM_MS && newStart === 0 && newEnd === lastIndex) return
+
+  isAdjustingZoom = true
+  chart.dispatchAction({
+    type: "dataZoom",
+    startValue: chartLabels[newStart],
+    endValue: chartLabels[newEnd],
+  })
+  isAdjustingZoom = false
+}
 </script>
